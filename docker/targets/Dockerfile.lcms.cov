@@ -1,0 +1,28 @@
+FROM libafl-coverage-base AS lcms-cov
+
+RUN apt-get update && apt-get install -y \
+    git make automake autoconf libtool wget \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/mm2/Little-CMS.git /src/Little-CMS && \
+    git -C /src/Little-CMS checkout f0d963261b28253999e239a844ac74d5a8960f40
+
+RUN wget -qO /src/cms_transform_fuzzer.cc \
+    https://raw.githubusercontent.com/google/fuzzbench/master/benchmarks/lcms_cms_transform_fuzzer/cms_transform_fuzzer.cc
+
+WORKDIR /src/Little-CMS
+RUN ./autogen.sh && \
+    ./configure CC="clang-18" CXX="clang++-18" \
+        CFLAGS="${COV_FLAGS}" CXXFLAGS="${COV_FLAGS}" && \
+    make -j$(nproc)
+
+# -fsanitize=fuzzer provides the libfuzzer main that replays files from argv.
+RUN mkdir -p /fuzz && \
+    clang++-18 ${COV_FLAGS} -fsanitize=fuzzer \
+        /src/cms_transform_fuzzer.cc \
+        -std=c++14 \
+        -I /src/Little-CMS/include \
+        /src/Little-CMS/src/.libs/liblcms2.a \
+        -o /fuzz/cms_transform_fuzzer
+
+ENV FUZZ_BIN=/fuzz/cms_transform_fuzzer

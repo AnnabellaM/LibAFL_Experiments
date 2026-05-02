@@ -1,0 +1,52 @@
+# Builds Little-CMS @ the exact FuzzBench-pinned commit, instrumented with a LibAFL fuzzer.
+#
+# Build args:
+#   FUZZER — fuzzer variant (default: generic)
+#
+# Usage:
+#   docker build --build-arg FUZZER=naive -t libafl-lcms-naive \
+#       -f docker/targets/Dockerfile.lcms .
+
+ARG FUZZER=generic
+FROM libafl-base AS lcms-build
+
+ARG FUZZER
+ENV FUZZER=${FUZZER}
+
+RUN apt-get update && apt-get install -y \
+    git make automake autoconf libtool wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone at FuzzBench-pinned commit (benchmark.yaml: f0d9632)
+RUN git clone https://github.com/mm2/Little-CMS.git /src/Little-CMS && \
+    git -C /src/Little-CMS checkout f0d963261b28253999e239a844ac74d5a8960f40
+
+# Fetch the OSS-Fuzz fuzzer harness (referenced by FuzzBench's build.sh)
+RUN wget -qO /src/cms_transform_fuzzer.cc \
+    https://raw.githubusercontent.com/google/fuzzbench/master/benchmarks/lcms_cms_transform_fuzzer/cms_transform_fuzzer.cc
+
+ENV CC=${FUZZER}_cc
+ENV CXX=${FUZZER}_cxx
+# --libafl-no-link: instruments all TUs but links only the stub runtime, so
+# autotools configure test programs compile and link without the fuzzer engine.
+ENV CFLAGS="--libafl-no-link"
+ENV CXXFLAGS="--libafl-no-link"
+
+WORKDIR /src/Little-CMS
+RUN ./autogen.sh && \
+    ./configure CC="${CC}" CXX="${CXX}" CFLAGS="${CFLAGS}" CXXFLAGS="${CXXFLAGS}" && \
+    make -j$(nproc)
+
+# Build the fuzzer binary. --libafl (without -no-link) on the final link step
+# links in the real LibAFL fuzzer engine.
+RUN mkdir -p /fuzz /corpus /seeds && \
+    ${CXX} --libafl /src/cms_transform_fuzzer.cc \
+        -std=c++14 \
+        -I include/ src/.libs/liblcms2.a \
+        -o /fuzz/cms_transform_fuzzer
+
+# Seed is provided via ./docker/seeds/lcms/ (a real ICC profile).
+
+ENV DURATION=86400
+
+CMD timeout --kill-after=10 ${DURATION} /fuzz/cms_transform_fuzzer -o /corpus -i /seeds; exit 0

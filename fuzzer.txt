@@ -1,0 +1,82 @@
+● ┌──────────────────────┬──────────────────────┬─────────────────────┬─────────────┬─────────────────────────────────┐
+  │        Fuzzer        │   Instrumentation    │  Corpus Scheduling  │   Energy    │        Mutation Strategy        │
+  │                      │                      │                     │ Assignment  │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ naive                │ edges + autotokens   │ Minimizer + Queue   │ plain       │ havoc + tokens (LineageMutator) │
+  │                      │                      │                     │ (random)    │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ naive_ctx            │ edges + ctx +        │ Minimizer + Queue   │ plain       │ havoc + tokens                  │
+  │                      │ autotokens           │                     │ (random)    │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ naive_ngram4         │ edges + ngram4 +     │ Minimizer + Queue   │ plain       │ havoc + tokens                  │
+  │                      │ autotokens           │                     │ (random)    │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ naive_ngram8         │ edges + ngram8 +     │ Minimizer + Queue   │ plain       │ havoc + tokens                  │
+  │                      │ autotokens           │                     │ (random)    │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ fast                 │ edges + autotokens   │ Minimizer +         │ fast        │ havoc + tokens (calibration)    │
+  │                      │                      │ PowerQueue          │             │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ fast_ctx             │ edges + ctx +        │ Minimizer +         │ fast        │ havoc + tokens (calibration)    │
+  │                      │ autotokens           │ PowerQueue          │             │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ fast_ngram4          │ edges + ngram4 +     │ Minimizer +         │ fast        │ havoc + tokens (calibration)    │
+  │                      │ autotokens           │ PowerQueue          │             │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │                      │ edges +              │ Minimizer +         │             │                                 │
+  │ fast_value_profile   │ value_profile +      │ PowerQueue          │ fast        │ havoc + tokens (calibration)    │
+  │                      │ autotokens           │                     │             │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ cmplog               │ edges + cmplog +     │ Minimizer + Queue   │ plain       │ tracing → I2S → havoc + tokens  │
+  │                      │ autotokens           │                     │ (random)    │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │                      │ edges +              │                     │ plain       │                                 │
+  │ value_profile        │ value_profile +      │ Minimizer + Queue   │ (random)    │ havoc + tokens                  │
+  │                      │ autotokens           │                     │             │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │                      │ edges +              │                     │ plain       │                                 │
+  │ value_profile_cmplog │ value_profile +      │ Minimizer + Queue   │ (random)    │ tracing → I2S → havoc + tokens  │
+  │                      │ cmplog + autotokens  │                     │             │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ mopt                 │ edges + autotokens   │ Minimizer + Queue   │ plain       │ havoc + tokens (MOpt selection) │
+  │                      │                      │                     │ (random)    │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ generic              │ edges + cmplog +     │ Minimizer +         │ fast        │ calibration → tracing → I2S →   │
+  │                      │ autotokens           │ PowerQueue          │             │ havoc + tokens (MOpt + power)   │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ explore              │ edges + autotokens   │ Minimizer +         │ explore     │ havoc + tokens (calibration)    │
+  │                      │                      │ PowerQueue          │             │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ coe                  │ edges + autotokens   │ Minimizer +         │ coe         │ havoc + tokens (calibration)    │
+  │                      │                      │ PowerQueue          │             │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ weighted             │ edges + autotokens   │ Minimizer +         │ plain       │ havoc + tokens (calibration)    │
+  │                      │                      │ Weighted            │ (random)    │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ rand_scheduler       │ edges + autotokens   │ Rand                │ plain       │ havoc + tokens                  │
+  │                      │                      │                     │ (random)    │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ cov_accounting       │ edges + autotokens   │ CoverageAccounting  │ plain       │ havoc + tokens                  │
+  │                      │                      │ + Queue             │ (random)    │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ grimoire             │ edges + cmplog +     │ Minimizer + Queue   │ plain       │ generalization → tracing → I2S  │
+  │                      │ autotokens           │                     │ (random)    │ → havoc → Grimoire              │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ gramatron            │ edges                │ Minimizer + Queue   │ plain       │ Gramatron automaton mutations   │
+  │                      │                      │                     │ (random)    │                                 │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │                      │                      │                     │ plain       │ NautilusRandom×6 +              │
+  │ nautilus             │ edges                │ Minimizer + Queue   │ (random)    │ NautilusRecursion +             │
+  │                      │                      │                     │             │ NautilusSplice×3                │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │                      │                      │                     │ plain       │ NautilusRandom +                │
+  │ nautilus_mopt        │ edges                │ Minimizer + Queue   │ (random)    │ NautilusRecursion +             │
+  │                      │                      │                     │             │ NautilusSplice (MOpt)           │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │                      │ edges + cmplog +     │ Minimizer +         │             │ generalization → calibration →  │
+  │ text                 │ autotokens           │ PowerQueue          │ fast        │ tracing → I2S → havoc + tokens  │
+  │                      │                      │                     │             │ (MOpt + power) → Grimoire       │
+  ├──────────────────────┼──────────────────────┼─────────────────────┼─────────────┼─────────────────────────────────┤
+  │ token_level          │ edges                │ Minimizer + Queue   │ plain       │ encoded token mutations         │
+  │                      │                      │                     │ (random)    │ (grammar-seeded)                │     
+  └──────────────────────┴──────────────────────┴─────────────────────┴─────────────┴─────────────────────────────────┘

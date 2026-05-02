@@ -1,0 +1,31 @@
+FROM libafl-coverage-base AS bloaty-cov
+
+RUN apt-get update && apt-get install -y \
+    git cmake ninja-build g++ libz-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/google/bloaty.git /src/bloaty && \
+    git -C /src/bloaty checkout 52948c107c8f81045e7f9223ec02706b19cfa882 && \
+    git -C /src/bloaty submodule update --init --recursive
+
+# LIB_FUZZING_ENGINE triggers bloaty's cmake fuzz_target build target.
+# -fsanitize=fuzzer provides the libfuzzer main that replays files from argv.
+ENV LIB_FUZZING_ENGINE="-fsanitize=fuzzer"
+
+# bloaty's CMakeLists.txt does set(CMAKE_CXX_FLAGS "-W -Wall ...") which wipes
+# any -DCMAKE_CXX_FLAGS passed on the cmake command line. However it also does
+# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} $ENV{CXXFLAGS}") so env vars survive.
+RUN mkdir -p /work/build && \
+    CFLAGS="${COV_FLAGS}" CXXFLAGS="${COV_FLAGS}" \
+    cmake -G Ninja \
+        -DBUILD_TESTING=false \
+        -DCMAKE_C_COMPILER=clang-18 \
+        -DCMAKE_CXX_COMPILER=clang++-18 \
+        -DCMAKE_EXE_LINKER_FLAGS="${COV_FLAGS}" \
+        -B /work/build \
+        /src/bloaty && \
+    ninja -j$(nproc) -C /work/build fuzz_target
+
+RUN mkdir -p /fuzz && cp /work/build/fuzz_target /fuzz/bloaty-fuzzer
+
+ENV FUZZ_BIN=/fuzz/bloaty-fuzzer

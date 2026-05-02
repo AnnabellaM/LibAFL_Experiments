@@ -1,0 +1,38 @@
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+debug = true
+
+[workspace]
+members = [
+    "agent_fuzzer",
+    "generic",
+    "text",
+    "naive", # indexlenmin scheduler
+    "naive_ctx",
+    "naive_ngram4",
+    "naive_ngram8",
+    "fast",
+    "fast_ctx",
+    "fast_ngram4",
+    "fast_value_profile",
+    "coe",
+    "explore",
+    "cmplog",
+    "value_profile",
+    "value_profile_cmplog",
+    "rand_scheduler",
+    "cov_accounting",
+    "mopt",
+    "gramatron",
+    "grimoire",
+    "nautilus",
+    "nautilus_mopt",
+    "token_level",
+    "weighted",
+    "minimizer",
+]
+exclude = [
+    "LibAFL",
+]

@@ -1,0 +1,55 @@
+FROM libafl-coverage-base AS mbedtls-cov
+
+RUN apt-get update && apt-get install -y \
+    git cmake make python3-pip perl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --recursive -b development \
+    https://github.com/Mbed-TLS/mbedtls.git /src/mbedtls && \
+    git -C /src/mbedtls checkout 169d9e6eb4096cb48aa25651f42b276089841087 && \
+    git -C /src/mbedtls submodule update --init --recursive
+
+RUN pip3 install -r /src/mbedtls/scripts/basic.requirements.txt
+
+RUN cd /src/mbedtls && perl scripts/config.pl set MBEDTLS_PLATFORM_TIME_ALT
+
+RUN mkdir -p /src/mbedtls/build && \
+    cd /src/mbedtls/build && \
+    cmake -DENABLE_TESTING=OFF \
+        -DCMAKE_C_COMPILER=clang-18 \
+        -DCMAKE_CXX_COMPILER=clang++-18 \
+        -DCMAKE_C_FLAGS="${COV_FLAGS}" \
+        -DMBEDTLS_FATAL_WARNINGS=OFF \
+        -DUSE_STATIC_MBEDTLS_LIBRARY=ON \
+        -DUSE_SHARED_MBEDTLS_LIBRARY=OFF \
+        .. && \
+    make -j$(nproc) mbedtls mbedx509 mbedcrypto
+
+# -fsanitize=fuzzer provides the libfuzzer main that replays files from argv.
+RUN mkdir -p /fuzz && \
+    clang-18 ${COV_FLAGS} \
+        -I /src/mbedtls/include \
+        -I /src/mbedtls/tests/include \
+        -c /src/mbedtls/programs/fuzz/fuzz_dtlsclient.c \
+        -o /tmp/fuzz_dtlsclient.o && \
+    clang-18 ${COV_FLAGS} \
+        -I /src/mbedtls/include \
+        -I /src/mbedtls/tests/include \
+        -c /src/mbedtls/programs/fuzz/common.c \
+        -o /tmp/fuzz_common.o && \
+    clang-18 ${COV_FLAGS} \
+        -I /src/mbedtls/include \
+        -I /src/mbedtls/tests/include \
+        -I /src/mbedtls/library \
+        -c /src/mbedtls/tests/src/certs.c \
+        -o /tmp/certs.o && \
+    clang++-18 ${COV_FLAGS} -fsanitize=fuzzer \
+        /tmp/fuzz_dtlsclient.o \
+        /tmp/fuzz_common.o \
+        /tmp/certs.o \
+        /src/mbedtls/build/library/libmbedtls.a \
+        /src/mbedtls/build/library/libmbedx509.a \
+        /src/mbedtls/build/library/libmbedcrypto.a \
+        -o /fuzz/fuzz_dtlsclient
+
+ENV FUZZ_BIN=/fuzz/fuzz_dtlsclient

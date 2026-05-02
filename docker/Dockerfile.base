@@ -1,0 +1,47 @@
+# Single stage: build environment is also the runtime.
+# The LLVM pass .so files built by cargo have their paths baked into the
+# compiler wrapper binaries, so we can't strip the build tree out.
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LLVM_VERSION=18
+
+RUN apt-get update && apt-get install -y \
+    build-essential cmake ninja-build git curl wget \
+    lsb-release software-properties-common gnupg \
+    pkg-config python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install LLVM 18
+RUN wget -qO llvm.sh https://apt.llvm.org/llvm.sh && \
+    chmod +x llvm.sh && ./llvm.sh ${LLVM_VERSION} && rm llvm.sh
+
+RUN apt-get update && apt-get install -y \
+    clang-18 llvm-18 llvm-18-dev libstdc++-11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Make clang-18 available as plain clang/clang++
+RUN update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-18   100 \
+ && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+
+# Install Rust (no default toolchain — rust-toolchain file controls it)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain none
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /build
+
+COPY rust-toolchain ./
+RUN rustup toolchain install "$(cat rust-toolchain)" \
+    && rustup component add rust-src --toolchain "$(cat rust-toolchain)"
+
+COPY . .
+
+# Ensure LLVM 18 is used
+RUN mkdir -p .cargo && \
+    printf '[env]\nLLVM_CONFIG = "llvm-config-18"\n' > .cargo/config.toml
+
+RUN cargo build --release
+
+# Put compiler wrappers on PATH so target Dockerfiles can use them by name
+ENV PATH="/build/target/release:${PATH}"

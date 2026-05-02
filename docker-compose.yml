@@ -1,0 +1,151 @@
+# docker-compose.yml
+# Defines a representative set of experiments: 3 fuzzers × 2 targets × 2 trials = 12 containers.
+# For the full set use run_experiments.sh instead.
+#
+# Build images first:
+#   docker build -f docker/Dockerfile.base -t libafl-base .
+#   docker compose build
+#
+# Run all:
+#   docker compose up -d
+#
+# Stop all:
+#   docker compose down
+
+x-defaults: &defaults
+  restart: "no"
+  mem_limit: 4g
+
+x-volumes: &seed-harfbuzz
+  - ./docker/seeds/harfbuzz:/seeds:ro
+
+x-volumes-bloaty: &seed-bloaty
+  - ./docker/seeds/bloaty:/seeds:ro
+
+services:
+
+  # ── harfbuzz × generic ──────────────────────────────────────────────────
+  harfbuzz-generic-1:
+    <<: *defaults
+    image: libafl-harfbuzz-generic
+    build:
+      context: .
+      dockerfile: docker/targets/Dockerfile.harfbuzz
+      args: { FUZZER: generic }
+    cpuset: "0"
+    volumes:
+      - *seed-harfbuzz
+      - ./results/harfbuzz/generic/trial1:/corpus
+
+  harfbuzz-generic-2:
+    <<: *defaults
+    image: libafl-harfbuzz-generic
+    cpuset: "1"
+    volumes:
+      - *seed-harfbuzz
+      - ./results/harfbuzz/generic/trial2:/corpus
+
+  # ── harfbuzz × fast ─────────────────────────────────────────────────────
+  harfbuzz-fast-1:
+    <<: *defaults
+    image: libafl-harfbuzz-fast
+    build:
+      context: .
+      dockerfile: docker/targets/Dockerfile.harfbuzz
+      args: { FUZZER: fast }
+    cpuset: "2"
+    volumes:
+      - *seed-harfbuzz
+      - ./results/harfbuzz/fast/trial1:/corpus
+
+  harfbuzz-fast-2:
+    <<: *defaults
+    image: libafl-harfbuzz-fast
+    cpuset: "3"
+    volumes:
+      - *seed-harfbuzz
+      - ./results/harfbuzz/fast/trial2:/corpus
+
+  # ── harfbuzz × cmplog ───────────────────────────────────────────────────
+  harfbuzz-cmplog-1:
+    <<: *defaults
+    image: libafl-harfbuzz-cmplog
+    build:
+      context: .
+      dockerfile: docker/targets/Dockerfile.harfbuzz
+      args: { FUZZER: cmplog }
+    cpuset: "4"
+    volumes:
+      - *seed-harfbuzz
+      - ./results/harfbuzz/cmplog/trial1:/corpus
+
+  harfbuzz-cmplog-2:
+    <<: *defaults
+    image: libafl-harfbuzz-cmplog
+    cpuset: "5"
+    volumes:
+      - *seed-harfbuzz
+      - ./results/harfbuzz/cmplog/trial2:/corpus
+
+  # ── bloaty × generic ────────────────────────────────────────────────────
+  bloaty-generic-1:
+    <<: *defaults
+    image: libafl-bloaty-generic
+    build:
+      context: .
+      dockerfile: docker/targets/Dockerfile.bloaty
+      args: { FUZZER: generic }
+    cpuset: "6"
+    volumes:
+      - *seed-bloaty
+      - ./results/bloaty/generic/trial1:/corpus
+
+  bloaty-generic-2:
+    <<: *defaults
+    image: libafl-bloaty-generic
+    cpuset: "7"
+    volumes:
+      - *seed-bloaty
+      - ./results/bloaty/generic/trial2:/corpus
+
+  # ── bloaty × fast ───────────────────────────────────────────────────────
+  bloaty-fast-1:
+    <<: *defaults
+    image: libafl-bloaty-fast
+    build:
+      context: .
+      dockerfile: docker/targets/Dockerfile.bloaty
+      args: { FUZZER: fast }
+    cpuset: "8"
+    volumes:
+      - *seed-bloaty
+      - ./results/bloaty/fast/trial1:/corpus
+
+  bloaty-fast-2:
+    <<: *defaults
+    image: libafl-bloaty-fast
+    cpuset: "9"
+    volumes:
+      - *seed-bloaty
+      - ./results/bloaty/fast/trial2:/corpus
+
+  # ── bloaty × cmplog ─────────────────────────────────────────────────────
+  bloaty-cmplog-1:
+    <<: *defaults
+    image: libafl-bloaty-cmplog
+    build:
+      context: .
+      dockerfile: docker/targets/Dockerfile.bloaty
+      args: { FUZZER: cmplog }
+    cpuset: "10"
+    volumes:
+      - *seed-bloaty
+      - ./results/bloaty/cmplog/trial1:/corpus
+
+  bloaty-cmplog-2:
+    <<: *defaults
+    image: libafl-bloaty-cmplog
+    cpuset: "11"
+    volumes:
+      - *seed-bloaty
+      - ./results/bloaty/cmplog/trial2:/corpus

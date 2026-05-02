@@ -1,0 +1,56 @@
+# Builds libpcap @ the exact FuzzBench-pinned commit, instrumented with a LibAFL fuzzer.
+#
+# Build args:
+#   FUZZER — fuzzer variant (default: generic)
+#
+# Usage:
+#   docker build --build-arg FUZZER=naive -t libafl-libpcap-naive \
+#       -f docker/targets/Dockerfile.libpcap .
+
+ARG FUZZER=generic
+FROM libafl-base AS libpcap-build
+
+ARG FUZZER
+ENV FUZZER=${FUZZER}
+
+RUN apt-get update && apt-get install -y \
+    git cmake flex bison \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone at FuzzBench-pinned commit (benchmark.yaml: 17ff63e)
+RUN git clone https://github.com/the-tcpdump-group/libpcap.git /src/libpcap && \
+    git -C /src/libpcap checkout 17ff63e88ea99112a905eefc6f862dac20de09e1
+
+ENV CC=${FUZZER}_cc
+ENV CXX=${FUZZER}_cxx
+# --libafl-no-link: instruments all TUs, stub runtime only — cmake configure
+# tests link cleanly without the fuzzer engine.
+ENV CFLAGS="--libafl-no-link"
+ENV CXXFLAGS="--libafl-no-link"
+
+# Build the instrumented libpcap static library
+RUN mkdir -p /src/libpcap/build && \
+    cd /src/libpcap/build && \
+    cmake -DDISABLE_DBUS=1 \
+        -DCMAKE_C_COMPILER="${CC}" \
+        -DCMAKE_C_FLAGS="${CFLAGS}" \
+        .. && \
+    make -j$(nproc)
+
+# Build the fuzzer harness (fuzz_both.c lives in the repo).
+# --libafl on the final link step adds the real LibAFL fuzzer engine.
+RUN mkdir -p /fuzz /corpus /seeds && \
+    ${CC} --libafl-no-link -I/src/libpcap \
+        -c /src/libpcap/testprogs/fuzz/fuzz_both.c \
+        -o /tmp/fuzz_both.o && \
+    ${CXX} /tmp/fuzz_both.o \
+        /src/libpcap/build/libpcap.a \
+        --libafl \
+        -o /fuzz/fuzz_both && \
+    # Minimal pcap seed (little-endian magic + v2.4 header, Ethernet linktype)
+    printf '\xd4\xc3\xb2\xa1\x02\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff\xff\x00\x00\x01\x00\x00\x00' \
+        > /seeds/seed.pcap
+
+ENV DURATION=86400
+
+CMD timeout --kill-after=10 ${DURATION} /fuzz/fuzz_both -o /corpus -i /seeds; exit 0

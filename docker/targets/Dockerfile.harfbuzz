@@ -1,0 +1,61 @@
+# Builds harfbuzz @ the exact FuzzBench-pinned commit, instrumented with a LibAFL fuzzer.
+#
+# Build args:
+#   FUZZER — fuzzer variant (default: generic)
+#
+# Usage:
+#   docker build --build-arg FUZZER=fast -t libafl-harfbuzz-fast \
+#       -f docker/targets/Dockerfile.harfbuzz .
+
+ARG FUZZER=generic
+FROM libafl-base AS harfbuzz-build
+
+ARG FUZZER
+ENV FUZZER=${FUZZER}
+
+# Mirror the FuzzBench benchmark Dockerfile deps
+RUN apt-get update && apt-get install -y \
+    git ragel pkg-config python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# FuzzBench uses meson 0.56.0 + ninja
+RUN python3 -m pip install ninja "meson==0.56.0"
+
+# Clone and pin to the exact FuzzBench commit (benchmark.yaml: cb47dca)
+RUN git clone https://github.com/harfbuzz/harfbuzz.git /src/harfbuzz && \
+    git -C /src/harfbuzz checkout cb47dca74cbf6d147aac9cf3067f249555aa68b1
+
+WORKDIR /src/harfbuzz
+
+# FuzzBench removes system freetype to avoid accidental dynamic linking
+RUN apt-get remove -y libfreetype6 2>/dev/null || true
+
+# Mirror FuzzBench's extra flags (vptr ubsan off, visibility suppressed).
+# --libafl-no-link: instruments all TUs but links only the stub runtime, so meson's
+# compiler test programs compile and link without needing libfuzzer_test_one_input.
+# The real LibAFL engine is linked via -Dfuzzer_ldflags="--libafl" below.
+ENV CFLAGS="--libafl-no-link -fno-sanitize=vptr -DHB_NO_VISIBILITY"
+ENV CXXFLAGS="--libafl-no-link -fno-sanitize=vptr -DHB_NO_VISIBILITY"
+ENV CC=${FUZZER}_cc
+ENV CXX=${FUZZER}_cxx
+
+# Build: --libafl in CFLAGS instruments all TUs; fuzzer_ldflags links the LibAFL engine
+# into the final fuzzer executable (equivalent to $LIB_FUZZING_ENGINE in FuzzBench)
+RUN meson setup \
+      --default-library=static \
+      --wrap-mode=nodownload \
+      -Dexperimental_api=true \
+      -Dfuzzer_ldflags="--libafl" \
+      /work/build \
+    || (cat /work/build/meson-logs/meson-log.txt && false)
+
+RUN ninja -v -j$(nproc) -C /work/build test/fuzzing/hb-shape-fuzzer
+
+RUN mkdir -p /corpus /fuzz /seeds && \
+    cp /work/build/test/fuzzing/hb-shape-fuzzer /fuzz/hb-shape-fuzzer && \
+    cp "/src/harfbuzz/test/fuzzing/fonts/clusterfuzz-testcase-minimized-hb-shape-fuzzer-5656511058018304" /seeds/seed
+
+# Total experiment duration in seconds (override with -e DURATION=86400)
+ENV DURATION=86400
+
+CMD timeout --kill-after=10 ${DURATION} /fuzz/hb-shape-fuzzer -o /corpus -i /seeds; exit 0

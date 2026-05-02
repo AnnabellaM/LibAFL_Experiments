@@ -1,0 +1,55 @@
+# Builds bloaty @ the exact FuzzBench-pinned commit, instrumented with a LibAFL fuzzer.
+#
+# Build args:
+#   FUZZER — fuzzer variant (default: generic)
+#
+# Usage:
+#   docker build --build-arg FUZZER=cmplog -t libafl-bloaty-cmplog \
+#       -f docker/targets/Dockerfile.bloaty .
+
+ARG FUZZER=generic
+FROM libafl-base AS bloaty-build
+
+ARG FUZZER
+ENV FUZZER=${FUZZER}
+
+# Mirror the FuzzBench benchmark Dockerfile deps
+RUN apt-get update && apt-get install -y \
+    git cmake ninja-build g++ libz-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone and pin to the exact FuzzBench commit (benchmark.yaml: 52948c1)
+RUN git clone https://github.com/google/bloaty.git /src/bloaty && \
+    git -C /src/bloaty checkout 52948c107c8f81045e7f9223ec02706b19cfa882 && \
+    git -C /src/bloaty submodule update --init --recursive
+
+ENV CC=${FUZZER}_cc
+ENV CXX=${FUZZER}_cxx
+# --libafl-no-link: instruments all TUs but links only the stub runtime, so cmake's
+# compiler test programs compile and link without needing libfuzzer_test_one_input.
+# --libafl on EXE_LINKER_FLAGS: links the real LibAFL engine into fuzz_target only.
+ENV CFLAGS="--libafl-no-link"
+ENV CXXFLAGS="--libafl-no-link"
+# Triggers the `if(DEFINED ENV{LIB_FUZZING_ENGINE})` branch in bloaty's CMakeLists.txt
+# which adds the fuzz_target build target. Actual linking is done via --libafl in LDFLAGS.
+ENV LIB_FUZZING_ENGINE=""
+
+# Mirror FuzzBench's build.sh exactly (cmake in $WORK, copy fuzz_target to $OUT)
+RUN cmake -G Ninja \
+      -DBUILD_TESTING=false \
+      -DCMAKE_C_COMPILER="${CC}" \
+      -DCMAKE_CXX_COMPILER="${CXX}" \
+      -DCMAKE_C_FLAGS="${CFLAGS}" \
+      -DCMAKE_CXX_FLAGS="${CXXFLAGS}" \
+      -DCMAKE_EXE_LINKER_FLAGS="--libafl" \
+      -B /work/build \
+      /src/bloaty && \
+    ninja -j$(nproc) -C /work/build fuzz_target
+
+RUN mkdir -p /corpus /fuzz /seeds && \
+    cp /work/build/fuzz_target /fuzz/bloaty-fuzzer && \
+    cp /src/bloaty/tests/testdata/fuzz_corpus/a69662c2423b5a1d1859f7981c9e88c4f821b0b7 /seeds/seed.elf
+
+ENV DURATION=86400
+
+CMD timeout --kill-after=10 ${DURATION} /fuzz/bloaty-fuzzer -o /corpus -i /seeds; exit 0

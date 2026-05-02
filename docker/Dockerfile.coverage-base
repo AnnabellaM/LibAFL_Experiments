@@ -1,0 +1,28 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LLVM_VERSION=18
+
+RUN apt-get update && apt-get install -y \
+    build-essential cmake ninja-build git curl wget \
+    lsb-release software-properties-common gnupg \
+    pkg-config python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN wget -qO llvm.sh https://apt.llvm.org/llvm.sh && \
+    chmod +x llvm.sh && ./llvm.sh ${LLVM_VERSION} && rm llvm.sh
+
+RUN apt-get update && apt-get install -y \
+    clang-18 llvm-18 llvm-18-dev libstdc++-11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/clang   clang   /usr/bin/clang-18   100 \
+ && update-alternatives --install /usr/bin/clang++ clang++ /usr/bin/clang++-18 100
+
+ENV COV_FLAGS="-fprofile-instr-generate -fcoverage-mapping"
+
+COPY docker/run_coverage_entrypoint.sh /run_coverage.sh
+COPY docker/run_coverage_timeseries_entrypoint.py /run_coverage_timeseries.py
+RUN chmod +x /run_coverage.sh
+
+ENTRYPOINT ["/run_coverage.sh"]

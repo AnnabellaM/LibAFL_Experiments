@@ -1,0 +1,58 @@
+# Builds sqlite3 @ the exact FuzzBench-pinned revision, instrumented with a LibAFL fuzzer.
+#
+# Build args:
+#   FUZZER — fuzzer variant (default: generic)
+#
+# Usage:
+#   docker build --build-arg FUZZER=naive -t libafl-sqlite3-naive \
+#       -f docker/targets/Dockerfile.sqlite3 .
+
+ARG FUZZER=generic
+FROM libafl-base AS sqlite3-build
+
+ARG FUZZER
+ENV FUZZER=${FUZZER}
+
+RUN apt-get update && apt-get install -y \
+    make autoconf tcl zlib1g-dev curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fetch sqlite3 source at FuzzBench-pinned tarball revision (r=c78cbf2e86850cc6)
+RUN mkdir -p /src/sqlite3 && \
+    curl -L 'https://sqlite.org/src/tarball/sqlite.tar.gz?r=c78cbf2e86850cc6' \
+        -o /tmp/sqlite3.tar.gz && \
+    tar xzf /tmp/sqlite3.tar.gz --strip-components=1 -C /src/sqlite3
+
+ENV CC=${FUZZER}_cc
+ENV CXX=${FUZZER}_cxx
+# --libafl-no-link: instruments all TUs, stub runtime only — autotools configure
+# test programs link cleanly without the fuzzer engine.
+# The sqlite-specific defines mirror FuzzBench's build.sh to prevent OOMs.
+ENV CFLAGS="--libafl-no-link \
+    -DSQLITE_MAX_LENGTH=128000000 \
+    -DSQLITE_MAX_SQL_LENGTH=128000000 \
+    -DSQLITE_MAX_MEMORY=25000000 \
+    -DSQLITE_PRINTF_PRECISION_LIMIT=1048576 \
+    -DSQLITE_DEBUG=1 \
+    -DSQLITE_MAX_PAGE_COUNT=16384"
+ENV CXXFLAGS="--libafl-no-link"
+
+# Configure and build the sqlite3 library; make sqlite3.c generates the amalgamation
+RUN mkdir -p /src/sqlite3/bld && \
+    cd /src/sqlite3/bld && \
+    ../configure CC="${CC}" CFLAGS="${CFLAGS}" && \
+    make -j$(nproc) && \
+    make sqlite3.c
+
+# Build the fuzzer. --libafl on the final link step adds the real LibAFL fuzzer engine.
+RUN mkdir -p /fuzz /corpus /seeds && \
+    cd /src/sqlite3/bld && \
+    ${CC} --libafl-no-link -I. -c ../test/ossfuzz.c -o /tmp/ossfuzz.o && \
+    ${CXX} /tmp/ossfuzz.o ./sqlite3.o \
+        --libafl -pthread -ldl -lz \
+        -o /fuzz/ossfuzz && \
+    printf 'SELECT 1;' > /seeds/seed.sql
+
+ENV DURATION=86400
+
+CMD timeout --kill-after=10 ${DURATION} /fuzz/ossfuzz -o /corpus -i /seeds; exit 0

@@ -1,0 +1,29 @@
+FROM libafl-coverage-base AS libpcap-cov
+
+RUN apt-get update && apt-get install -y \
+    git cmake flex bison \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/the-tcpdump-group/libpcap.git /src/libpcap && \
+    git -C /src/libpcap checkout 17ff63e88ea99112a905eefc6f862dac20de09e1
+
+RUN mkdir -p /src/libpcap/build && \
+    cd /src/libpcap/build && \
+    cmake -DDISABLE_DBUS=1 \
+        -DCMAKE_C_COMPILER=clang-18 \
+        -DCMAKE_C_FLAGS="${COV_FLAGS}" \
+        .. && \
+    make -j$(nproc)
+
+# -fsanitize=fuzzer provides the libfuzzer main that replays files from argv.
+RUN mkdir -p /fuzz && \
+    clang-18 ${COV_FLAGS} \
+        -I /src/libpcap \
+        -c /src/libpcap/testprogs/fuzz/fuzz_both.c \
+        -o /tmp/fuzz_both.o && \
+    clang++-18 ${COV_FLAGS} -fsanitize=fuzzer \
+        /tmp/fuzz_both.o \
+        /src/libpcap/build/libpcap.a \
+        -o /fuzz/fuzz_both
+
+ENV FUZZ_BIN=/fuzz/fuzz_both

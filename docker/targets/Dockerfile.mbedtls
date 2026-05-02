@@ -1,0 +1,83 @@
+# Builds mbedtls @ the exact FuzzBench-pinned commit, instrumented with a LibAFL fuzzer.
+# Fuzz target: fuzz_dtlsclient
+#
+# Build args:
+#   FUZZER — fuzzer variant (default: generic)
+#
+# Usage:
+#   docker build --build-arg FUZZER=naive -t libafl-mbedtls-naive \
+#       -f docker/targets/Dockerfile.mbedtls .
+
+ARG FUZZER=generic
+FROM libafl-base AS mbedtls-build
+
+ARG FUZZER
+ENV FUZZER=${FUZZER}
+
+RUN apt-get update && apt-get install -y \
+    git cmake make python3-pip perl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone at FuzzBench-pinned commit (benchmark.yaml: 169d9e6)
+RUN git clone --recursive -b development \
+    https://github.com/Mbed-TLS/mbedtls.git /src/mbedtls && \
+    git -C /src/mbedtls checkout 169d9e6eb4096cb48aa25651f42b276089841087 && \
+    git -C /src/mbedtls submodule update --init --recursive
+
+RUN pip3 install -r /src/mbedtls/scripts/basic.requirements.txt
+
+# Mirror FuzzBench's build.sh: enable MBEDTLS_PLATFORM_TIME_ALT
+RUN cd /src/mbedtls && perl scripts/config.pl set MBEDTLS_PLATFORM_TIME_ALT
+
+ENV CC=${FUZZER}_cc
+ENV CXX=${FUZZER}_cxx
+# --libafl-no-link: instruments all TUs, stub runtime only — cmake configure
+# tests link cleanly without the fuzzer engine.
+ENV CFLAGS="--libafl-no-link"
+ENV CXXFLAGS="--libafl-no-link"
+
+# Build only the mbedtls static libraries (not the fuzz programs or test runners)
+RUN mkdir -p /src/mbedtls/build && \
+    cd /src/mbedtls/build && \
+    cmake -DENABLE_TESTING=OFF \
+        -DCMAKE_C_COMPILER="${CC}" \
+        -DCMAKE_CXX_COMPILER="${CXX}" \
+        -DCMAKE_C_FLAGS="${CFLAGS}" \
+        -DUSE_STATIC_MBEDTLS_LIBRARY=ON \
+        -DUSE_SHARED_MBEDTLS_LIBRARY=OFF \
+        .. && \
+    make -j$(nproc) mbedtls mbedx509 mbedcrypto
+
+# Compile and link fuzz_dtlsclient manually for full control over the link step.
+# --libafl on the final link step adds the real LibAFL fuzzer engine.
+# helpers.c provides common utilities shared across mbedtls fuzz programs.
+RUN mkdir -p /fuzz /corpus /seeds && \
+    ${CC} --libafl-no-link \
+        -I /src/mbedtls/include \
+        -I /src/mbedtls/tests/include \
+        -c /src/mbedtls/programs/fuzz/fuzz_dtlsclient.c \
+        -o /tmp/fuzz_dtlsclient.o && \
+    ${CC} --libafl-no-link \
+        -I /src/mbedtls/include \
+        -I /src/mbedtls/tests/include \
+        -c /src/mbedtls/programs/fuzz/common.c \
+        -o /tmp/fuzz_common.o && \
+    ${CC} --libafl-no-link \
+        -I /src/mbedtls/include \
+        -I /src/mbedtls/tests/include \
+        -I /src/mbedtls/library \
+        -c /src/mbedtls/tests/src/certs.c \
+        -o /tmp/certs.o && \
+    ${CXX} /tmp/fuzz_dtlsclient.o /tmp/fuzz_common.o /tmp/certs.o \
+        /src/mbedtls/build/library/libmbedtls.a \
+        /src/mbedtls/build/library/libmbedx509.a \
+        /src/mbedtls/build/library/libmbedcrypto.a \
+        --libafl \
+        -o /fuzz/fuzz_dtlsclient && \
+    # Minimal DTLS record seed (content-type 22 = handshake, DTLS 1.0 version)
+    printf '\x16\xfe\xff\x00\x00\x00\x00\x00\x00\x00\x00\x00\x03\x01\x00\x00' \
+        > /seeds/seed.dtls
+
+ENV DURATION=86400
+
+CMD timeout --kill-after=10 ${DURATION} /fuzz/fuzz_dtlsclient -o /corpus -i /seeds; exit 0
