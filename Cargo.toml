@@ -6,7 +6,6 @@ debug = true
 
 [workspace]
 members = [
-    "agent_fuzzer",
     "generic",
     "text",
     "naive", # indexlenmin scheduler

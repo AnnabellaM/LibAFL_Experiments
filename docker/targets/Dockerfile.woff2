@@ -1,0 +1,79 @@
+# Builds woff2 @ the exact FuzzBench-pinned commit, instrumented with a LibAFL fuzzer.
+# Fuzz target: convert_woff2ttf_fuzzer (decodes WOFF2 to TTF via woff2::ConvertWOFF2ToTTF)
+#
+# Build args:
+#   FUZZER — fuzzer variant (default: generic)
+#
+# Usage:
+#   docker build --build-arg FUZZER=naive -t libafl-woff2-naive \
+#       -f docker/targets/Dockerfile.woff2 .
+
+ARG FUZZER=generic
+FROM libafl-base AS woff2-build
+
+ARG FUZZER
+ENV FUZZER=${FUZZER}
+
+RUN apt-get update && apt-get install -y \
+    git make automake autoconf libtool \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone brotli at the pinned commit referenced by the woff2 benchmark Dockerfile.
+RUN git clone https://github.com/google/brotli.git /src/brotli && \
+    git -C /src/brotli checkout 3a9032ba8733532a6cd6727970bade7f7c0e2f52
+
+# Clone woff2 at the FuzzBench-pinned commit (benchmark.yaml: 8109a2c)
+RUN git clone https://github.com/google/woff2.git /src/woff2 && \
+    git -C /src/woff2 checkout 8109a2cc2b27436962ac1cfe40ad0e8a0dca26c8
+
+# Fetch the OSS-Fuzz corpus at the FuzzBench-pinned commit for seed inputs.
+RUN git clone https://github.com/google/oss-fuzz.git /src/oss-fuzz && \
+    git -C /src/oss-fuzz checkout e8ffee4077b59e35824a2e97aa214ee95d39ed13
+
+ENV CC=${FUZZER}_cc
+ENV CXX=${FUZZER}_cxx
+# --libafl-no-link: instruments all TUs, stub runtime only — autotools/configure
+# tests link cleanly without the fuzzer engine.
+ENV CFLAGS="--libafl-no-link"
+ENV CXXFLAGS="--libafl-no-link"
+
+# Inline the FuzzBench fuzz harness (target.cc) verbatim. Small enough to embed
+# rather than wget; keeps the build hermetic.
+RUN printf '%s\n' \
+    '#include <stddef.h>' \
+    '#include <stdint.h>' \
+    '#include "woff2_dec.h"' \
+    'extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {' \
+    '  std::string buf;' \
+    '  woff2::WOFF2StringOut out(&buf);' \
+    '  out.SetMaxSize(30 * 1024 * 1024);' \
+    '  woff2::ConvertWOFF2ToTTF(data, size, &out);' \
+    '  return 0;' \
+    '}' \
+    > /src/target.cc
+
+# Mirror FuzzBench's build.sh: compile woff2 src + brotli to .o, then link.
+WORKDIR /src/woff2
+RUN set -e && \
+    for f in font.cc normalize.cc transform.cc woff2_common.cc woff2_dec.cc \
+             woff2_enc.cc glyph.cc table_tags.cc variable_length.cc woff2_out.cc; do \
+        ${CXX} ${CXXFLAGS} -std=c++11 -I /src/brotli/dec -I /src/brotli/enc \
+            -c src/$f & \
+    done; \
+    for f in /src/brotli/dec/*.c; do \
+        ${CC} ${CFLAGS} -c $f & \
+    done; \
+    for f in /src/brotli/enc/*.cc; do \
+        ${CXX} ${CXXFLAGS} -c $f & \
+    done; \
+    wait
+
+# Final link: --libafl pulls in the real LibAFL fuzzer engine.
+RUN mkdir -p /fuzz /corpus /seeds && \
+    ${CXX} *.o --libafl /src/target.cc -I src \
+        -o /fuzz/convert_woff2ttf_fuzzer && \
+    cp /src/oss-fuzz/projects/woff2/corpus/* /seeds/
+
+ENV DURATION=86400
+
+CMD timeout --kill-after=10 ${DURATION} /fuzz/convert_woff2ttf_fuzzer -o /corpus -i /seeds; exit 0

@@ -1,0 +1,28 @@
+FROM libafl-coverage-base AS jsoncpp-cov
+
+RUN apt-get update && apt-get install -y \
+    git make cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/open-source-parsers/jsoncpp.git /src/jsoncpp && \
+    git -C /src/jsoncpp checkout 5defb4ed1a4293b8e2bf641e16b156fb9de498cc
+
+RUN mkdir -p /src/jsoncpp/build && \
+    cd /src/jsoncpp/build && \
+    cmake -DCMAKE_C_COMPILER=clang-18 -DCMAKE_CXX_COMPILER=clang++-18 \
+          -DCMAKE_C_FLAGS="${COV_FLAGS}" -DCMAKE_CXX_FLAGS="${COV_FLAGS}" \
+          -DJSONCPP_WITH_POST_BUILD_UNITTEST=OFF \
+          -DJSONCPP_WITH_TESTS=OFF \
+          -DBUILD_SHARED_LIBS=OFF \
+          -G "Unix Makefiles" .. && \
+    make -j$(nproc)
+
+# -fsanitize=fuzzer provides the libfuzzer main that replays files from argv.
+RUN mkdir -p /fuzz && \
+    clang++-18 ${COV_FLAGS} -fsanitize=fuzzer \
+        -I/src/jsoncpp/include \
+        /src/jsoncpp/src/test_lib_json/fuzz.cpp \
+        /src/jsoncpp/build/lib/libjsoncpp.a \
+        -o /fuzz/jsoncpp_fuzzer
+
+ENV FUZZ_BIN=/fuzz/jsoncpp_fuzzer

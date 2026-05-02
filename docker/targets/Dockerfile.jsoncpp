@@ -1,0 +1,61 @@
+# Builds jsoncpp @ a pinned commit, instrumented with a LibAFL fuzzer.
+# Fuzz target: jsoncpp_fuzzer (parses JSON via Json::CharReader)
+#
+# Mirrors FuzzBench's benchmarks/jsoncpp_jsoncpp_fuzzer build.sh, with a
+# fixed commit so the experiment is reproducible (FuzzBench's own Dockerfile
+# tracks master).
+#
+# Build args:
+#   FUZZER - fuzzer variant (default: generic)
+#
+# Usage:
+#   docker build --build-arg FUZZER=naive -t libafl-jsoncpp-naive \
+#       -f docker/targets/Dockerfile.jsoncpp .
+
+ARG FUZZER=generic
+FROM libafl-base AS jsoncpp-build
+
+ARG FUZZER
+ENV FUZZER=${FUZZER}
+
+RUN apt-get update && apt-get install -y \
+    git make cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pin to jsoncpp 1.9.5 release for reproducibility.
+RUN git clone https://github.com/open-source-parsers/jsoncpp.git /src/jsoncpp && \
+    git -C /src/jsoncpp checkout 5defb4ed1a4293b8e2bf641e16b156fb9de498cc
+
+ENV CC=${FUZZER}_cc
+ENV CXX=${FUZZER}_cxx
+# --libafl-no-link: instruments all TUs, stub runtime only - cmake's compile
+# checks link cleanly without the fuzzer engine.
+ENV CFLAGS="--libafl-no-link"
+ENV CXXFLAGS="--libafl-no-link"
+
+# Build static libjsoncpp.a via the upstream cmake project.
+RUN mkdir -p /src/jsoncpp/build && \
+    cd /src/jsoncpp/build && \
+    cmake -DCMAKE_C_COMPILER=${CC} -DCMAKE_CXX_COMPILER=${CXX} \
+          -DCMAKE_C_FLAGS="${CFLAGS}" -DCMAKE_CXX_FLAGS="${CXXFLAGS}" \
+          -DJSONCPP_WITH_POST_BUILD_UNITTEST=OFF \
+          -DJSONCPP_WITH_TESTS=OFF \
+          -DBUILD_SHARED_LIBS=OFF \
+          -G "Unix Makefiles" .. && \
+    make -j$(nproc)
+
+# Final link: --libafl pulls in the real LibAFL fuzzer engine. Harness is
+# the in-tree FuzzBench fuzz target shipped with jsoncpp.
+RUN mkdir -p /fuzz /corpus /seeds && \
+    ${CXX} --libafl -I/src/jsoncpp/include \
+        /src/jsoncpp/src/test_lib_json/fuzz.cpp \
+        /src/jsoncpp/build/lib/libjsoncpp.a \
+        -o /fuzz/jsoncpp_fuzzer && \
+    cp /src/jsoncpp/src/test_lib_json/fuzz.dict /fuzz/jsoncpp_fuzzer.dict && \
+    printf '{}' > /seeds/seed-empty-object && \
+    printf '[]' > /seeds/seed-empty-array && \
+    printf '{"a":1,"b":[true,null,"x"]}' > /seeds/seed-mixed
+
+ENV DURATION=86400
+
+CMD timeout --kill-after=10 ${DURATION} /fuzz/jsoncpp_fuzzer -o /corpus -i /seeds; exit 0
