@@ -72,7 +72,10 @@ RUN set -e && \
 RUN mkdir -p /fuzz /corpus /seeds && \
     ${CXX} *.o --libafl /src/target.cc -I src \
         -o /fuzz/convert_woff2ttf_fuzzer && \
-    cp /src/oss-fuzz/projects/woff2/corpus/* /seeds/
+    # Single meaningful WOFF2 seed (first file from the OSS-Fuzz woff2 corpus).
+    # WOFF2 is strict-format, so we keep a real upstream sample rather than an
+    # inline placeholder; one seed isolates fuzzer capability from corpus size.
+    cp "$(ls /src/oss-fuzz/projects/woff2/corpus/* | head -1)" /seeds/seed.woff2
 
 ENV DURATION=86400
 

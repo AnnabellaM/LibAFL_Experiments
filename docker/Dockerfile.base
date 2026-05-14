@@ -41,7 +41,19 @@ COPY . .
 RUN mkdir -p .cargo && \
     printf '[env]\nLLVM_CONFIG = "llvm-config-18"\n' > .cargo/config.toml
 
+# LibAFL @ pinned commit predates the dangerous_implicit_autorefs lint
+# becoming deny-by-default in nightly-2025-07-01.
+ENV RUSTFLAGS="-A dangerous_implicit_autorefs"
 RUN cargo build --release
+
+# Grammar fuzzers (nautilus, gramatron, grimoire) link against libpython3.8
+# and libexpat at target-link time via the LibAFL wrapper. python3.8 isn't in
+# Ubuntu 22.04's default repos, so add deadsnakes. Done after cargo build to
+# avoid invalidating the slow Rust compile cache.
+RUN add-apt-repository -y ppa:deadsnakes/ppa && \
+    apt-get update && apt-get install -y \
+        libpython3.8 libexpat1-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Put compiler wrappers on PATH so target Dockerfiles can use them by name
 ENV PATH="/build/target/release:${PATH}"

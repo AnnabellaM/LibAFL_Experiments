@@ -1,0 +1,33 @@
+FROM libafl-coverage-base AS libxml2-cov
+
+RUN apt-get update && apt-get install -y \
+    git make automake autoconf libtool pkg-config python3 \
+    zlib1g-dev liblzma-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://gitlab.gnome.org/GNOME/libxml2.git /src/libxml2 && \
+    git -C /src/libxml2 checkout c7260a47f19e01f4f663b6a56fbdc2dafd8a6e7e
+
+WORKDIR /src/libxml2
+RUN ./autogen.sh \
+        --disable-shared \
+        --without-debug \
+        --without-ftp \
+        --without-http \
+        --without-legacy \
+        --without-python \
+        CC="clang-18" CXX="clang++-18" \
+        CFLAGS="${COV_FLAGS}" CXXFLAGS="${COV_FLAGS}" && \
+    make -j$(nproc)
+
+RUN cd fuzz && make clean-corpus && make fuzz.o && make xml.o
+
+# -fsanitize=fuzzer provides the libfuzzer main that replays files from argv.
+RUN mkdir -p /fuzz && \
+    clang++-18 ${COV_FLAGS} -fsanitize=fuzzer \
+        /src/libxml2/fuzz/xml.o /src/libxml2/fuzz/fuzz.o \
+        /src/libxml2/.libs/libxml2.a \
+        -Wl,-Bstatic -lz -llzma -Wl,-Bdynamic \
+        -o /fuzz/xml
+
+ENV FUZZ_BIN=/fuzz/xml

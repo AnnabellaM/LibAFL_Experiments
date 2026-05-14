@@ -1,0 +1,106 @@
+# Builds OpenThread @ the exact FuzzBench-pinned commit, instrumented with a LibAFL fuzzer.
+# Fuzz target: ot-ip6-send-fuzzer (exercises otIp6Send via tests/fuzz/ip6_send.cpp)
+#
+# Mirrors openthread's own tests/fuzz/oss-fuzz-build (which FuzzBench delegates
+# to): cmake/ninja build with OT_FUZZ_TARGETS=ON, OT_PLATFORM=external, then
+# fuzzers land in build/tests/fuzz/. The fuzz CMakeLists.txt reads
+# $ENV{LIB_FUZZING_ENGINE} for the link flag, so we point it at --libafl.
+#
+# Build args:
+#   FUZZER — fuzzer variant (default: generic)
+#
+# Usage:
+#   docker build --build-arg FUZZER=naive -t libafl-openthread-naive \
+#       -f docker/targets/Dockerfile.openthread .
+
+ARG FUZZER=generic
+FROM libafl-base AS openthread-build
+
+ARG FUZZER
+ENV FUZZER=${FUZZER}
+
+RUN apt-get update && apt-get install -y \
+    git cmake ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone at FuzzBench-pinned commit (benchmark.yaml: 2550699)
+RUN git clone https://github.com/openthread/openthread.git /src/openthread && \
+    git -C /src/openthread checkout 25506997f286fdbfa72725f4cee78c922c896255
+
+ENV CC=${FUZZER}_cc
+ENV CXX=${FUZZER}_cxx
+# --libafl-no-link: instruments all TUs but links only the stub runtime, so
+# cmake's compile checks and intermediate static archives don't need the engine.
+ENV CFLAGS="--libafl-no-link"
+ENV CXXFLAGS="--libafl-no-link"
+# tests/fuzz/CMakeLists.txt links each fuzzer with $ENV{LIB_FUZZING_ENGINE};
+# --libafl on the wrapper pulls in the real LibAFL engine at link time.
+ENV LIB_FUZZING_ENGINE="--libafl"
+
+WORKDIR /src/openthread
+RUN mkdir build && cd build && \
+    cmake -GNinja \
+        -DCMAKE_C_COMPILER="${CC}" \
+        -DCMAKE_CXX_COMPILER="${CXX}" \
+        -DCMAKE_C_FLAGS="${CFLAGS}" \
+        -DCMAKE_CXX_FLAGS="${CXXFLAGS}" \
+        -DOT_BUILD_EXECUTABLES=OFF \
+        -DOT_FUZZ_TARGETS=ON \
+        -DOT_MTD=OFF \
+        -DOT_PLATFORM=external \
+        -DOT_RCP=OFF \
+        -DOT_BORDER_AGENT=ON \
+        -DOT_BORDER_ROUTER=ON \
+        -DOT_CHANNEL_MANAGER=ON \
+        -DOT_CHANNEL_MONITOR=ON \
+        -DOT_CHILD_SUPERVISION=ON \
+        -DOT_COAP=ON \
+        -DOT_COAPS=ON \
+        -DOT_COAP_BLOCK=ON \
+        -DOT_COAP_OBSERVE=ON \
+        -DOT_COMMISSIONER=ON \
+        -DOT_DATASET_UPDATER=ON \
+        -DOT_DHCP6_CLIENT=ON \
+        -DOT_DHCP6_SERVER=ON \
+        -DOT_DNS_CLIENT=ON \
+        -DOT_ECDSA=ON \
+        -DOT_HISTORY_TRACKER=ON \
+        -DOT_IP6_FRAGM=ON \
+        -DOT_JAM_DETECTION=ON \
+        -DOT_JOINER=ON \
+        -DOT_LINK_RAW=ON \
+        -DOT_LOG_OUTPUT=APP \
+        -DOT_MAC_FILTER=ON \
+        -DOT_MTD_NETDIAG=ON \
+        -DOT_NETDATA_PUBLISHER=ON \
+        -DOT_PING_SENDER=ON \
+        -DOT_SERVICE=ON \
+        -DOT_SLAAC=ON \
+        -DOT_SNTP_CLIENT=ON \
+        -DOT_SRP_CLIENT=ON \
+        -DOT_SRP_SERVER=ON \
+        -DOT_THREAD_VERSION=1.3 \
+        -DOT_UPTIME=ON \
+        .. && \
+    ninja ot-ip6-send-fuzzer
+
+# Place the fuzzer + seed corpus where the harness expects them.
+RUN mkdir -p /fuzz /corpus /seeds && \
+    cp /src/openthread/build/tests/fuzz/ot-ip6-send-fuzzer /fuzz/ && \
+    # Single meaningful seed: first packet from openthread's own fuzz corpus
+    # (real captured IPv6/Thread payload). Keeping one seed isolates fuzzer
+    # capability from corpus richness. Falls back to a minimal hand-crafted
+    # IPv6 header if the corpus directory is missing.
+    if ls /src/openthread/tests/fuzz/corpora/ot-ip6-send-fuzzer/* >/dev/null 2>&1; then \
+        cp "$(ls /src/openthread/tests/fuzz/corpora/ot-ip6-send-fuzzer/* | head -1)" \
+            /seeds/seed.ip6; \
+    else \
+        # version=6, payload-len=0, next-header=59 (no-next), hop-limit=64,
+        # link-local src fe80::1, link-local dst fe80::2.
+        printf '\x60\x00\x00\x00\x00\x00\x3b\x40\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\xfe\x80\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02' \
+            > /seeds/seed.ip6; \
+    fi
+
+ENV DURATION=86400
+
+CMD timeout --kill-after=10 ${DURATION} /fuzz/ot-ip6-send-fuzzer -o /corpus -i /seeds; exit 0

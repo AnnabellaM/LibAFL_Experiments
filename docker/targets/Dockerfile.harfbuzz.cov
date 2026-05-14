@@ -1,0 +1,35 @@
+FROM libafl-coverage-base AS harfbuzz-cov
+
+RUN apt-get update && apt-get install -y \
+    git ragel pkg-config python3 python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install ninja "meson==0.56.0"
+
+RUN git clone https://github.com/harfbuzz/harfbuzz.git /src/harfbuzz && \
+    git -C /src/harfbuzz checkout cb47dca74cbf6d147aac9cf3067f249555aa68b1
+
+WORKDIR /src/harfbuzz
+
+RUN apt-get remove -y libfreetype6 2>/dev/null || true
+
+ENV CFLAGS="${COV_FLAGS} -fno-sanitize=vptr -DHB_NO_VISIBILITY"
+ENV CXXFLAGS="${COV_FLAGS} -fno-sanitize=vptr -DHB_NO_VISIBILITY"
+ENV CC=clang-18
+ENV CXX=clang++-18
+
+# -fsanitize=fuzzer provides the libfuzzer main that replays files from argv.
+RUN meson setup \
+      --default-library=static \
+      --wrap-mode=nodownload \
+      -Dexperimental_api=true \
+      -Dfuzzer_ldflags="-fsanitize=fuzzer" \
+      /work/build \
+    || (cat /work/build/meson-logs/meson-log.txt && false)
+
+RUN ninja -v -j$(nproc) -C /work/build test/fuzzing/hb-shape-fuzzer
+
+RUN mkdir -p /fuzz && \
+    cp /work/build/test/fuzzing/hb-shape-fuzzer /fuzz/hb-shape-fuzzer
+
+ENV FUZZ_BIN=/fuzz/hb-shape-fuzzer

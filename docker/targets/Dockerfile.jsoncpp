@@ -52,9 +52,10 @@ RUN mkdir -p /fuzz /corpus /seeds && \
         /src/jsoncpp/build/lib/libjsoncpp.a \
         -o /fuzz/jsoncpp_fuzzer && \
     cp /src/jsoncpp/src/test_lib_json/fuzz.dict /fuzz/jsoncpp_fuzzer.dict && \
-    printf '{}' > /seeds/seed-empty-object && \
-    printf '[]' > /seeds/seed-empty-array && \
-    printf '{"a":1,"b":[true,null,"x"]}' > /seeds/seed-mixed
+    # Single meaningful JSON seed (object + array + mixed value types). One
+    # seed isolates fuzzer capability from corpus richness; JSON is permissive
+    # so an inline literal is a valid starting point.
+    printf '{"a":1,"b":[true,null,"x"]}' > /seeds/seed.json
 
 ENV DURATION=86400
 

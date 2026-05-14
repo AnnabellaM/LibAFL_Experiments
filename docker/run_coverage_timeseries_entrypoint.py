@@ -19,6 +19,7 @@ Environment variables:
 import csv
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -96,15 +97,9 @@ def get_branch_coverage(running: str, report_dir: str = None):
         os.makedirs(report_dir, exist_ok=True)
         with open(os.path.join(report_dir, "branch_coverage_summary.txt"), "w") as f:
             f.write(r.stdout)
-
-        show = subprocess.run(
-            ["llvm-cov-18", "show", FUZZ_BIN,
-             f"-instr-profile={running}",
-             "-show-branches=count", "-show-line-counts", "-format=text"],
-            capture_output=True, text=True,
-        )
-        with open(os.path.join(report_dir, "branch_coverage_show.txt"), "w") as f:
-            f.write(show.stdout)
+        # Snapshot the profdata so `llvm-cov show` can be rendered later on demand,
+        # without paying the per-checkpoint show cost during replay.
+        shutil.copyfile(running, os.path.join(report_dir, "running.profdata"))
 
     for line in reversed(r.stdout.splitlines()):
         if line.startswith("TOTAL"):

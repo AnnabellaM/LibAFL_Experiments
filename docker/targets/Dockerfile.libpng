@@ -1,0 +1,73 @@
+# Builds libpng @ the exact FuzzBench-pinned commit, instrumented with a LibAFL fuzzer.
+# Fuzz target: libpng_read_fuzzer (decodes PNG via png_read_*)
+#
+# Mirrors libpng's own contrib/oss-fuzz/build.sh (which FuzzBench delegates to):
+# patch pnglibconf.dfa to disable STDIO/WARNING/WRITE, autoreconf, configure
+# with the OSS_FUZZ_ symbol prefix, build libpng16.la, link the harness.
+#
+# Build args:
+#   FUZZER — fuzzer variant (default: generic)
+#
+# Usage:
+#   docker build --build-arg FUZZER=naive -t libafl-libpng-naive \
+#       -f docker/targets/Dockerfile.libpng .
+
+ARG FUZZER=generic
+FROM libafl-base AS libpng-build
+
+ARG FUZZER
+ENV FUZZER=${FUZZER}
+
+RUN apt-get update && apt-get install -y \
+    git make automake autoconf libtool pkg-config \
+    zlib1g-dev wget ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone at FuzzBench-pinned commit (benchmark.yaml: cd0ea2a)
+RUN git clone https://github.com/glennrp/libpng.git /src/libpng && \
+    git -C /src/libpng checkout cd0ea2a7f53b603d3d9b5b891c779c430047b39a
+
+ENV CC=${FUZZER}_cc
+ENV CXX=${FUZZER}_cxx
+# --libafl-no-link: instruments all TUs, stub runtime only — autotools configure
+# tests link cleanly without the fuzzer engine.
+ENV CFLAGS="--libafl-no-link"
+ENV CXXFLAGS="--libafl-no-link"
+
+WORKDIR /src/libpng
+
+# Disable logging in the library build (matches contrib/oss-fuzz/build.sh).
+RUN sed -e "s/option STDIO/option STDIO disabled/" \
+        -e "s/option WARNING /option WARNING disabled/" \
+        -e "s/option WRITE enables WRITE_INT_FUNCTIONS/option WRITE disabled/" \
+        scripts/pnglibconf.dfa > scripts/pnglibconf.dfa.tmp && \
+    mv scripts/pnglibconf.dfa.tmp scripts/pnglibconf.dfa
+
+# Build the instrumented static libpng16.
+RUN autoreconf -f -i && \
+    ./configure --with-libpng-prefix=OSS_FUZZ_ \
+        CC="${CC}" CXX="${CXX}" CFLAGS="${CFLAGS}" CXXFLAGS="${CXXFLAGS}" && \
+    make -j$(nproc) clean && \
+    make -j$(nproc) libpng16.la
+
+# Final link: --libafl pulls in the real LibAFL fuzzer engine. Harness is
+# the in-tree OSS-Fuzz fuzz target shipped with libpng.
+RUN mkdir -p /fuzz /corpus /seeds && \
+    ${CXX} ${CXXFLAGS} -std=c++11 -I. \
+        /src/libpng/contrib/oss-fuzz/libpng_read_fuzzer.cc \
+        .libs/libpng16.a \
+        --libafl \
+        -lz \
+        -o /fuzz/libpng_read_fuzzer && \
+    # The dictionary isn't shipped in libpng@cd0ea2a; fetch the canonical PNG
+    # dict from google/fuzzing (mirrors FuzzBench's libpng Dockerfile).
+    wget --no-check-certificate -qO /fuzz/libpng_read_fuzzer.dict \
+        https://raw.githubusercontent.com/google/fuzzing/master/dictionaries/png.dict && \
+    # Single canonical PNG seed — libpng's own reference test image. We
+    # deliberately keep one meaningful seed so results measure the fuzzer's
+    # exploration, not corpus richness (libpng ships ~150 test PNGs).
+    cp /src/libpng/pngtest.png /seeds/seed.png
+
+ENV DURATION=86400
+
+CMD timeout --kill-after=10 ${DURATION} /fuzz/libpng_read_fuzzer -o /corpus -i /seeds; exit 0

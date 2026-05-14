@@ -1,0 +1,34 @@
+FROM libafl-coverage-base AS libpng-cov
+
+RUN apt-get update && apt-get install -y \
+    git make automake autoconf libtool pkg-config \
+    zlib1g-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/glennrp/libpng.git /src/libpng && \
+    git -C /src/libpng checkout cd0ea2a7f53b603d3d9b5b891c779c430047b39a
+
+WORKDIR /src/libpng
+
+RUN sed -e "s/option STDIO/option STDIO disabled/" \
+        -e "s/option WARNING /option WARNING disabled/" \
+        -e "s/option WRITE enables WRITE_INT_FUNCTIONS/option WRITE disabled/" \
+        scripts/pnglibconf.dfa > scripts/pnglibconf.dfa.tmp && \
+    mv scripts/pnglibconf.dfa.tmp scripts/pnglibconf.dfa
+
+RUN autoreconf -f -i && \
+    ./configure --with-libpng-prefix=OSS_FUZZ_ \
+        CC="clang-18" CXX="clang++-18" \
+        CFLAGS="${COV_FLAGS}" CXXFLAGS="${COV_FLAGS}" && \
+    make -j$(nproc) clean && \
+    make -j$(nproc) libpng16.la
+
+# -fsanitize=fuzzer provides the libfuzzer main that replays files from argv.
+RUN mkdir -p /fuzz && \
+    clang++-18 ${COV_FLAGS} -fsanitize=fuzzer -std=c++11 -I. \
+        /src/libpng/contrib/oss-fuzz/libpng_read_fuzzer.cc \
+        /src/libpng/.libs/libpng16.a \
+        -lz \
+        -o /fuzz/libpng_read_fuzzer
+
+ENV FUZZ_BIN=/fuzz/libpng_read_fuzzer

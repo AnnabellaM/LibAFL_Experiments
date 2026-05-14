@@ -1,0 +1,73 @@
+# Builds libxml2 @ the exact FuzzBench-pinned commit, instrumented with a LibAFL fuzzer.
+# Fuzz target: xml (libxml2's in-tree fuzz/xml.c — parses XML via xmlReadMemory)
+#
+# Mirrors FuzzBench's benchmarks/libxml2_xml build.sh: configure with
+# --disable-shared and the --without-* options, build the static lib, then
+# build fuzz/{fuzz,xml}.o and link manually.
+#
+# Build args:
+#   FUZZER — fuzzer variant (default: generic)
+#
+# Usage:
+#   docker build --build-arg FUZZER=naive -t libafl-libxml2-naive \
+#       -f docker/targets/Dockerfile.libxml2 .
+
+ARG FUZZER=generic
+FROM libafl-base AS libxml2-build
+
+ARG FUZZER
+ENV FUZZER=${FUZZER}
+
+RUN apt-get update && apt-get install -y \
+    git make automake autoconf libtool pkg-config python3 \
+    zlib1g-dev liblzma-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone at FuzzBench-pinned commit (benchmark.yaml: c7260a4)
+RUN git clone https://gitlab.gnome.org/GNOME/libxml2.git /src/libxml2 && \
+    git -C /src/libxml2 checkout c7260a47f19e01f4f663b6a56fbdc2dafd8a6e7e
+
+ENV CC=${FUZZER}_cc
+ENV CXX=${FUZZER}_cxx
+# --libafl-no-link: instruments all TUs but links only the stub runtime, so
+# autotools configure test programs compile and link without the fuzzer engine.
+ENV CFLAGS="--libafl-no-link"
+ENV CXXFLAGS="--libafl-no-link"
+
+WORKDIR /src/libxml2
+RUN ./autogen.sh \
+        --disable-shared \
+        --without-debug \
+        --without-ftp \
+        --without-http \
+        --without-legacy \
+        --without-python \
+        CC="${CC}" CXX="${CXX}" CFLAGS="${CFLAGS}" CXXFLAGS="${CXXFLAGS}" && \
+    make -j$(nproc)
+
+# Build the in-tree fuzz harness objects.
+RUN cd fuzz && make clean-corpus && make fuzz.o && make xml.o
+
+# Final link: --libafl pulls in the real LibAFL fuzzer engine.
+# -Bstatic/-Bdynamic mirrors FuzzBench's link line.
+RUN mkdir -p /fuzz /corpus /seeds && \
+    ${CXX} ${CXXFLAGS} \
+        /src/libxml2/fuzz/xml.o /src/libxml2/fuzz/fuzz.o \
+        /src/libxml2/.libs/libxml2.a \
+        --libafl \
+        -Wl,-Bstatic -lz -llzma -Wl,-Bdynamic \
+        -o /fuzz/xml
+
+# Single meaningful seed: first XML produced by libxml2's own seed generator.
+# Keeping one seed isolates fuzzer capability from corpus richness; XML is a
+# permissive text format so the inline fallback is also a valid starting point.
+RUN cd /src/libxml2/fuzz && (make seed/xml.stamp || true) && \
+    if ls seed/xml/* >/dev/null 2>&1; then \
+        cp "$(ls seed/xml/* | head -1)" /seeds/seed.xml; \
+    else \
+        printf '<?xml version="1.0"?><root><a x="1">hi</a></root>' > /seeds/seed.xml; \
+    fi
+
+ENV DURATION=86400
+
+CMD timeout --kill-after=10 ${DURATION} /fuzz/xml -o /corpus -i /seeds; exit 0

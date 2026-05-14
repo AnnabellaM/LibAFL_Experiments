@@ -1,0 +1,79 @@
+# Builds curl @ the exact FuzzBench-pinned commit, instrumented with a LibAFL fuzzer.
+# Fuzz target: curl_fuzzer_http (drives curl through curl-fuzzer's HTTP harness)
+#
+# FuzzBench's curl_curl_fuzzer_http benchmark delegates the build to the
+# curl/curl-fuzzer repo (./ossfuzz.sh), which clones+builds zlib/openssl/nghttp2,
+# then curl, then the fuzzer binaries, all keyed on the OSS-Fuzz env vars
+# (CC/CXX/CFLAGS/LIB_FUZZING_ENGINE/SANITIZER/OUT). We reuse that machinery and
+# only neuter the post-build `make check` step, which would try to exec the
+# fuzzers as unit tests — LibAFL's main isn't shaped for that.
+#
+# Build args:
+#   FUZZER — fuzzer variant (default: generic)
+#
+# Usage:
+#   docker build --build-arg FUZZER=naive -t libafl-curl-naive \
+#       -f docker/targets/Dockerfile.curl .
+
+ARG FUZZER=generic
+FROM libafl-base AS curl-build
+
+ARG FUZZER
+ENV FUZZER=${FUZZER}
+
+# Deps from curl-fuzzer's scripts/ossfuzzdeps.sh, plus wget/unzip/ca-certs that
+# the dependency download scripts reach for.
+RUN apt-get update && apt-get install -y \
+    git make autoconf automake libtool pkg-config \
+    libssl-dev zlib1g-dev \
+    wget zip unzip ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Pinned curl-fuzzer commit referenced by FuzzBench's Dockerfile.
+RUN git clone https://github.com/curl/curl-fuzzer.git /src/curl_fuzzer && \
+    git -C /src/curl_fuzzer checkout dd486c1e5910e722e43c451d4de928ac80f5967d
+
+# curl @ FuzzBench-pinned commit (benchmark.yaml: a20f74a)
+RUN git clone https://github.com/curl/curl.git /src/curl && \
+    git -C /src/curl checkout a20f74a16ae1e89be170eeaa6059b37e513392a4
+
+ENV CC=${FUZZER}_cc
+ENV CXX=${FUZZER}_cxx
+# --libafl-no-link: instruments all TUs but links only the stub runtime, so the
+# many configure/test programs in the dep + curl builds link cleanly.
+ENV CFLAGS="--libafl-no-link"
+ENV CXXFLAGS="--libafl-no-link"
+# curl-fuzzer's Makefile links each fuzzer with $LIB_FUZZING_ENGINE; --libafl
+# tells the wrapper to pull in the real LibAFL engine at the final link step.
+ENV LIB_FUZZING_ENGINE="--libafl"
+# ossfuzz.sh special-cases SANITIZER=memory (skips openssl); any other value is
+# treated as a normal build. The wrapper does NOT add a sanitizer based on this.
+ENV SANITIZER="address"
+ENV ARCHITECTURE="x86_64"
+ENV OUT="/fuzz"
+ENV SRC="/src"
+
+# scripts/compile_fuzzer.sh runs `make check`, which exec's the just-built
+# fuzzer binaries; with the LibAFL engine they expect -i/-o args and won't
+# behave like libFuzzer unit tests. Replace that one line with a no-op.
+RUN sed -i 's|make check.*|true|' /src/curl_fuzzer/scripts/compile_fuzzer.sh
+
+RUN mkdir -p /fuzz /corpus /seeds && \
+    cd /src/curl_fuzzer && ./ossfuzz.sh
+
+# Single meaningful seed: first transcript from `make zip`'s output corpus.
+# We deliberately keep one to isolate fuzzer capability from corpus richness;
+# curl-fuzzer ships dozens of recorded HTTP transactions which would otherwise
+# pre-supply most of the easy coverage. Fallback is a minimal HTTP/1.0 GET.
+RUN if [ -f /fuzz/curl_fuzzer_http_seed_corpus.zip ]; then \
+        mkdir -p /tmp/curl_seeds && \
+        unzip -q -o /fuzz/curl_fuzzer_http_seed_corpus.zip -d /tmp/curl_seeds && \
+        cp "$(find /tmp/curl_seeds -type f | head -1)" /seeds/seed.http && \
+        rm -rf /tmp/curl_seeds; \
+    else \
+        printf 'GET / HTTP/1.0\r\nHost: example.com\r\n\r\n' > /seeds/seed.http; \
+    fi
+
+ENV DURATION=86400
+
+CMD timeout --kill-after=10 ${DURATION} /fuzz/curl_fuzzer_http -o /corpus -i /seeds; exit 0
