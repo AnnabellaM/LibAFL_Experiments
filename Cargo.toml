@@ -24,6 +24,7 @@ members = [
     "rand_scheduler",
     "cov_accounting",
     "mopt",
+    "mopt_cmplog",
     "gramatron",
     "grimoire",
     "nautilus",

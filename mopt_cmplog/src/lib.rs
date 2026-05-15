@@ -1,9 +1,16 @@
 //! A singlethreaded libfuzzer-like fuzzer that can auto-restart.
+//!
+//! Combines the MOpt mutator (adaptive operator selection) with the
+//! cmplog/i2s tracing+input2state stages. Lineage tracking semantics
+//! follow the `mopt` crate: per-mutation names are not captured because
+//! `StdMOptMutator`'s internal stacking is private; only `ParentInfo`
+//! (parent_id, parent_file, execs, elapsed_ms) is recorded.
 use mimalloc::MiMalloc;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 use libafl::observers::CanTrack;
 use libafl::HasMetadata;
+
 use libafl_bolts::{
     current_nanos,
     impl_serdeany,
@@ -39,16 +46,18 @@ use libafl::{
     inputs::{BytesInput, HasTargetBytes},
     monitors::SimpleMonitor,
     mutators::{
-        havoc_mutations::havoc_mutations, tokens_mutations, MutationResult, Mutator,
-        StdMOptMutator, Tokens,
+        havoc_mutations::havoc_mutations, token_mutations::I2SRandReplace, tokens_mutations,
+        MutationResult, Mutator, StdMOptMutator, StdScheduledMutator, Tokens,
     },
     observers::{HitcountsMapObserver, TimeObserver},
     schedulers::{IndexesLenTimeMinimizerScheduler, QueueScheduler},
-    stages::StdMutationalStage,
+    stages::{StdMutationalStage, TracingStage},
     state::{HasCorpus, HasExecutions, HasStartTime, StdState},
     Error,
 };
-use libafl_targets::{libfuzzer_initialize, libfuzzer_test_one_input, std_edges_map_observer};
+use libafl_targets::{
+    libfuzzer_initialize, libfuzzer_test_one_input, std_edges_map_observer, CmpLogObserver,
+};
 use serde::{Deserialize, Serialize};
 
 #[cfg(target_os = "linux")]
@@ -157,7 +166,7 @@ impl<S> StateInitializer<S> for LineageFeedback {}
 
 impl<EM, OT, S> Feedback<EM, BytesInput, OT, S> for LineageFeedback
 where
-    S: HasMetadata + HasCurrentCorpusId + HasCorpus,
+    S: HasMetadata + HasCurrentCorpusId + HasCorpus + HasExecutions + HasStartTime,
 {
     fn append_metadata(
         &mut self,
@@ -173,11 +182,20 @@ where
                 .ok()
                 .and_then(|tc| tc.borrow().filename().clone());
 
+            // i2s stage uses StdScheduledMutator (not LineageMutatorWrap), so it
+            // does not refresh MutationLog. Fall back to live state values when
+            // the snapshot is missing or stale enough that the feedback is firing
+            // outside a MOpt mutate() round.
             let (execs, elapsed_ms) = state
                 .metadata_map()
                 .get::<MutationLog>()
                 .map(|log| (log.execs, log.elapsed_ms))
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    let execs = *state.executions();
+                    let elapsed_ms =
+                        (libafl_bolts::current_time() - *state.start_time()).as_millis() as u64;
+                    (execs, elapsed_ms)
+                });
 
             testcase.add_metadata(ParentInfo {
                 parent_id: Some(usize::from(parent_id) as u64),
@@ -191,13 +209,11 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+
 /// The fuzzer main (as `no_mangle` C function)
 #[no_mangle]
 pub fn libafl_main() {
-    // Registry the metadata types used in this fuzzer
-    // Needed only on no_std
-    //RegistryBuilder::register::<Tokens>();
-
     let res = match Command::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
         .author("AFLplusplus team")
@@ -256,7 +272,6 @@ pub fn libafl_main() {
         }
     }
 
-    // For fuzzbench, crashes and finds are inside the same `corpus` directory, in the "queue" and "crashes" subdir.
     let mut out_dir = PathBuf::from(
         res.get_one::<String>("out")
             .expect("The --output parameter is missing")
@@ -297,8 +312,6 @@ pub fn libafl_main() {
 }
 
 fn run_testcases(filenames: &[&str]) {
-    // The actual target run starts here.
-    // Call LLVMFUzzerInitialize() if present.
     let args: Vec<String> = env::args().collect();
     if unsafe { libfuzzer_initialize(&args) } == -1 {
         println!("Warning: LLVMFuzzerInitialize failed with -1")
@@ -335,7 +348,6 @@ fn fuzz(
     #[cfg(unix)]
     let file_null = File::open("/dev/null")?;
 
-    // 'While the monitor are state, they are usually used in the broker - which is likely never restarted
     let monitor = SimpleMonitor::new(|s| {
         #[cfg(unix)]
         writeln!(&mut stdout_cpy, "{}", s).unwrap();
@@ -343,13 +355,10 @@ fn fuzz(
         println!("{}", s);
     });
 
-    // We need a shared map to store our state before a crash.
-    // This way, we are able to continue fuzzing afterwards.
     let mut shmem_provider = StdShMemProvider::new()?;
 
     let (state, mut mgr) = match SimpleRestartingEventManager::launch(monitor, &mut shmem_provider)
     {
-        // The restarting state will spawn the same process again as child, then restarted it each time it crashes.
         Ok(res) => res,
         Err(err) => match err {
             Error::ShuttingDown => {
@@ -361,39 +370,26 @@ fn fuzz(
         },
     };
 
-    // Create an observation channel using the coverage map
-    // We don't use the hitcounts (see the Cargo.toml, we use pcguard_edges)
     let edges_observer =
         HitcountsMapObserver::new(unsafe { std_edges_map_observer("edges") }).track_indices();
 
-    // Create an observation channel to keep track of the execution time
     let time_observer = TimeObserver::new("time");
 
-    // Feedback to rate the interestingness of an input
-    // This one is composed by two Feedbacks in OR
+    let cmplog_observer = CmpLogObserver::new("cmplog", true);
+
     let mut feedback = feedback_or!(
-        // New maximization map feedback linked to the edges observer and the feedback state
         MaxMapFeedback::new(&edges_observer),
-        // Time feedback, this one does not need a feedback state
         TimeFeedback::new(&time_observer),
         LineageFeedback::new()
     );
 
-    // A feedback to choose if an input is a solution or not
     let mut objective = CrashFeedback::new();
 
-    // If not restarting, create a State from scratch
     let mut state = state.unwrap_or_else(|| {
         StdState::new(
-            // RNG
             StdRand::with_seed(current_nanos()),
-            // Corpus that will be evolved, we keep it in memory for performance
             InMemoryOnDiskCorpus::new(corpus_dir).unwrap(),
-            // Corpus in which we store solutions (crashes in this example),
-            // on disk so the user can get them after stopping the fuzzer
             OnDiskCorpus::new(objective_dir).unwrap(),
-            // States of the feedbacks.
-            // They are the data related to the feedbacks that you want to persist in the State.
             &mut feedback,
             &mut objective,
         )
@@ -402,14 +398,15 @@ fn fuzz(
 
     println!("Let's fuzz :)");
 
-    // The actual target run starts here.
-    // Call LLVMFUzzerInitialize() if present.
     let args: Vec<String> = env::args().collect();
     if unsafe { libfuzzer_initialize(&args) } == -1 {
         println!("Warning: LLVMFuzzerInitialize failed with -1")
     }
 
-    // Setup a MOPT mutator, wrapped to snapshot execs/elapsed_ms for lineage
+    // Setup a randomic Input2State stage
+    let i2s = StdMutationalStage::new(StdScheduledMutator::new(tuple_list!(I2SRandReplace::new())));
+
+    // MOpt mutator wrapped to snapshot execs/elapsed_ms for lineage
     let mutator = StdMutationalStage::new(LineageMutatorWrap::new(
         StdMOptMutator::new::<BytesInput, _>(
             &mut state,
@@ -419,13 +416,10 @@ fn fuzz(
         )?,
     ));
 
-    // A minimization+queue policy to get testcasess from the corpus
     let scheduler = IndexesLenTimeMinimizerScheduler::new(&edges_observer, QueueScheduler::new());
 
-    // A fuzzer with feedbacks and a corpus scheduler
     let mut fuzzer = StdFuzzer::new(scheduler, feedback, objective);
 
-    // The wrapped harness function, calling out to the LLVM-style harness
     let mut harness = |input: &BytesInput| {
         let target = input.target_bytes();
         let buf = target.as_slice();
@@ -433,7 +427,8 @@ fn fuzz(
         ExitKind::Ok
     };
 
-    // Create the executor for an in-process function with one observer for edge coverage and one for the execution time
+    let mut tracing_harness = harness;
+
     let mut executor = InProcessExecutor::with_timeout(
         &mut harness,
         tuple_list!(edges_observer, time_observer),
@@ -443,10 +438,20 @@ fn fuzz(
         timeout,
     )?;
 
-    // The order of the stages matter!
-    let mut stages = tuple_list!(mutator);
+    // Setup a tracing stage in which we log comparisons
+    let tracing = TracingStage::new(InProcessExecutor::with_timeout(
+        &mut tracing_harness,
+        tuple_list!(cmplog_observer),
+        &mut fuzzer,
+        &mut state,
+        &mut mgr,
+        // Give it more time!
+        timeout * 10,
+    )?);
 
-    // Read tokens
+    // The order of the stages matter!
+    let mut stages = tuple_list!(tracing, i2s, mutator);
+
     if state.metadata_map().get::<Tokens>().is_none() {
         let mut toks = Tokens::default();
         if let Some(tokenfile) = tokenfile {
@@ -462,7 +467,6 @@ fn fuzz(
         }
     }
 
-    // In case the corpus is empty (on first run), reset
     if state.corpus().count() < 1 {
         state
             .load_initial_inputs(&mut fuzzer, &mut executor, &mut mgr, &[seed_dir.clone()])
@@ -473,7 +477,6 @@ fn fuzz(
         println!("We imported {} inputs from disk.", state.corpus().count());
     }
 
-    // Remove target ouput (logs still survive)
     #[cfg(unix)]
     {
         let null_fd = file_null.as_raw_fd();
@@ -483,6 +486,5 @@ fn fuzz(
 
     fuzzer.fuzz_loop(&mut stages, &mut executor, &mut state, &mut mgr)?;
 
-    // Never reached
     Ok(())
 }

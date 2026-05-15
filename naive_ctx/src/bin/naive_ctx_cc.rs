@@ -15,12 +15,38 @@ pub fn main() {
 
         dir.pop();
 
+        // The sancov_ctx pass injects reads/writes to `__afl_prev_ctx`, a
+        // u32 storage location provided by libafl_targets/src/coverage.c. With
+        // `--libafl-no-link` (used during target configure / intermediate-tool
+        // builds) libafl_targets is not linked, so the symbol is undefined and
+        // the link fails. Provide a weak storage location via a compiled stub
+        // that we generate on the fly and pass as an extra source file. When
+        // `--libafl` links the final fuzzer binary, the strong definition in
+        // libafl_targets wins over this weak one.
+        let no_link = args.iter().any(|a| a == "--libafl-no-link");
+        // `-c` means compile-only — passing an extra source file would break
+        // the single-input → single-output invariant. Only add the stub for
+        // link-producing invocations.
+        let is_compile_only = args.iter().any(|a| a == "-c");
+        let needs_stub = no_link && !is_compile_only;
+        let stub_path = "/tmp/__afl_prev_ctx_stub.c";
+        if needs_stub && !std::path::Path::new(stub_path).exists() {
+            // Idempotent: same content every time, safe under parallel writes.
+            // `visibility("default")` ensures the symbol stays exported even
+            // when the target uses `-fvisibility=hidden` (lcms does), so DSOs
+            // built against it can resolve their import.
+            let _ = std::fs::write(
+                stub_path,
+                "__attribute__((weak, visibility(\"default\"))) unsigned int __afl_prev_ctx;\n",
+            );
+        }
+
         let mut cc = ClangWrapper::new();
 
         #[cfg(target_os = "linux")]
         cc.add_pass(LLVMPasses::AutoTokens);
 
-        if let Some(code) = cc
+        let cc_ref = cc
             .cpp(is_cpp)
             // silence the compiler wrapper output, needed for some configure scripts.
             .silence(true)
@@ -31,10 +57,13 @@ pub fn main() {
             .link_staticlib(&dir, env!("CARGO_PKG_NAME"))
             .add_passes_linking_arg("-lm")
             .add_pass(LLVMPasses::Ctx)
-            .add_arg("-fsanitize-coverage=trace-pc-guard")
-            .run()
-            .expect("Failed to run the wrapped compiler")
-        {
+            .add_arg("-fsanitize-coverage=trace-pc-guard");
+
+        if needs_stub {
+            cc_ref.add_arg(stub_path);
+        }
+
+        if let Some(code) = cc_ref.run().expect("Failed to run the wrapped compiler") {
             std::process::exit(code);
         }
     } else {
